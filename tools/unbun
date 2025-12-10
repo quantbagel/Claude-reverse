@@ -1,0 +1,51 @@
+#!/bin/bash
+# tools/unbun - Extract JavaScript source from Bun-compiled binaries
+# Usage: tools/unbun <bun_binary> [output.js]
+#
+# Bun embeds the transpiled JS source at the end of the binary.
+# This tool extracts it.
+
+set -e
+
+if [[ -z "$1" ]]; then
+    echo "Usage: tools/unbun <bun_binary> [output.js]"
+    echo ""
+    echo "Extracts embedded JavaScript from a Bun-compiled executable."
+    exit 1
+fi
+
+BINARY="$1"
+OUTPUT="${2:-}"
+
+if [[ ! -f "$BINARY" ]]; then
+    echo "ERROR: Binary not found: $BINARY"
+    exit 1
+fi
+
+echo "=== Extracting JavaScript from Bun binary ==="
+echo "Binary: $BINARY"
+echo ""
+
+# The source code is embedded at the end, between "// filename.ts" and "---- Bun! ----"
+# Extract everything from the first "// " comment before "---- Bun! ----"
+JS_CONTENT=$(strings "$BINARY" | grep -B1000 "Bun!" | tail -200 | sed -n '/^\/\/ /,/---- Bun!/p' | grep -v "Bun!")
+
+if [[ -z "$JS_CONTENT" ]]; then
+    echo "WARNING: Could not find embedded source code."
+    echo "Trying alternate extraction..."
+    # Fallback: get lines that look like JS before the marker
+    JS_CONTENT=$(strings "$BINARY" | grep -B50 "Bun!" | grep -E "^(function|var|const|let|console|return|if|for|while|\}|\{)" | head -100)
+fi
+
+if [[ -n "$OUTPUT" ]]; then
+    echo "$JS_CONTENT" > "$OUTPUT"
+    echo "Extracted to: $OUTPUT"
+    wc -l "$OUTPUT"
+else
+    echo "=== Extracted JavaScript ==="
+    echo ""
+    echo "$JS_CONTENT"
+fi
+
+echo ""
+echo "=== Extraction complete ==="

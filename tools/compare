@@ -1,0 +1,196 @@
+#!/bin/bash
+# tools/compare - Compare compiled assembly against original binary
+# Usage: tools/compare <function_name> <source_file.c>
+#
+# This tool compiles the source file and compares the resulting assembly
+# against the original function in the binary. Returns MATCH or MISMATCH.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Load config
+if [[ -f "$PROJECT_ROOT/config.sh" ]]; then
+    source "$PROJECT_ROOT/config.sh"
+else
+    echo "ERROR: config.sh not found. Run init.sh first."
+    exit 1
+fi
+
+# Fix BINARY_PATH for Docker container - translate absolute host paths to /project paths
+if [[ "$BINARY_PATH" == /Users/* ]] && [[ -d "/project" ]]; then
+    # We're inside Docker - translate the path
+    # Extract the path relative to project root
+    BINARY_PATH="/project/targets/df/df_linux/libs/Dwarf_Fortress"
+fi
+
+if [[ -z "$1" ]] || [[ -z "$2" ]]; then
+    echo "ERROR: Missing arguments."
+    echo "Usage: tools/compare <function_name> <source_file.c>"
+    echo "Example: tools/compare main src/main.c"
+    exit 1
+fi
+
+FUNC_NAME="$1"
+SOURCE_FILE="$2"
+
+# Resolve to absolute path if relative
+if [[ "$SOURCE_FILE" != /* ]]; then
+    SOURCE_FILE="$PROJECT_ROOT/$SOURCE_FILE"
+fi
+
+if [[ ! -f "$SOURCE_FILE" ]]; then
+    echo "ERROR: Source file not found: $SOURCE_FILE"
+    exit 1
+fi
+
+BUILD_DIR="$PROJECT_ROOT/.build"
+COMPARE_DIR="$BUILD_DIR/compare"
+mkdir -p "$COMPARE_DIR"
+
+# Handle .c, .cpp, .cc, .cxx extensions
+BASENAME=$(basename "$SOURCE_FILE")
+for ext in .c .cpp .cc .cxx; do
+    BASENAME="${BASENAME%$ext}"
+done
+OBJ_FILE="$BUILD_DIR/$BASENAME.o"
+
+echo "=== Comparing $FUNC_NAME ==="
+echo ""
+
+# Step 1: Build the source file
+echo "Step 1: Compiling $SOURCE_FILE..."
+if ! "$SCRIPT_DIR/build" "$SOURCE_FILE" >/dev/null 2>&1; then
+    "$SCRIPT_DIR/build" "$SOURCE_FILE"
+    echo ""
+    echo "COMPARISON FAILED: Build errors. You should fix the build errors first."
+    exit 1
+fi
+echo "Compilation successful."
+echo ""
+
+# Step 2: Extract assembly from compiled object
+echo "Step 2: Extracting compiled assembly..."
+COMPILED_ASM="$COMPARE_DIR/${FUNC_NAME}_compiled.asm"
+
+# For macOS, extract just the instruction mnemonics (skip addresses and bytes)
+objdump -d "$OBJ_FILE" | \
+    grep -E '^\s+[0-9a-f]+:' | \
+    sed 's/^[[:space:]]*[0-9a-f]*:[[:space:]]*[0-9a-f ]*[[:space:]]*//' | \
+    tr '[:upper:]' '[:lower:]' > "$COMPILED_ASM"
+
+if [[ ! -s "$COMPILED_ASM" ]]; then
+    echo "WARNING: No assembly extracted from object file."
+    echo "Object dump:"
+    objdump -d "$OBJ_FILE"
+fi
+
+# Step 3: Extract assembly from original binary
+echo "Step 3: Extracting original assembly..."
+ORIGINAL_ASM="$COMPARE_DIR/${FUNC_NAME}_original.asm"
+
+# Helper to extract instructions from r2 output
+extract_instructions() {
+    # Filter to lines with addresses and hex bytes
+    # Format: │ 0x00a10c10 48c7075031.. mov qword [rdi], ...
+    # or:     \ 0x00a10c17 e944ffffff jmp ...
+    grep -E "0x[0-9a-f]{5,}" | \
+    grep -v "^INFO\|^WARN\|^ERROR" | \
+    sed 's/[[:space:]]*;.*//' | \
+    sed 's/.*0x[0-9a-f]*[[:space:]]*[0-9a-f\.]*[[:space:]]*//' | \
+    sed 's/^[│┌└├─╎ \\\.`=<>:-]*//g' | \
+    grep -v "^$" | \
+    grep -v "^vtable\|^method\|^sym\|^fcn\.\|^args\|^[0-9]" | \
+    tr '[:upper:]' '[:lower:]'
+}
+
+# Try different ways to find the function
+FUNC_ADDR=""
+
+# Method 1: Direct lookup via afl with the function name
+FUNC_ADDR=$(r2 -q -e scr.color=0 -c "aaa; afl~$FUNC_NAME" "$BINARY_PATH" 2>&1 | grep -v "^INFO\|^WARN" | head -1 | awk '{print $1}')
+
+# Method 2: If func name looks like 'method.X.virtual_N', look for the r2 label
+if [[ -z "$FUNC_ADDR" ]] && [[ "$FUNC_NAME" == method.* ]]; then
+    FUNC_ADDR=$(r2 -q -e scr.color=0 -c "aaa; afl" "$BINARY_PATH" 2>&1 | grep "$FUNC_NAME" | head -1 | awk '{print $1}')
+fi
+
+# Method 3: Try as a symbol name
+if [[ -z "$FUNC_ADDR" ]]; then
+    FUNC_ADDR=$(r2 -q -e scr.color=0 -c "aaa; s sym.$FUNC_NAME; ?v $$" "$BINARY_PATH" 2>&1 | grep -v "^INFO\|^WARN" | tail -1)
+fi
+
+if [[ -n "$FUNC_ADDR" ]] && [[ "$FUNC_ADDR" != "0x0" ]]; then
+    echo "Found function at $FUNC_ADDR"
+    r2 -q -e scr.color=0 -c "aaa; s $FUNC_ADDR; pdf" "$BINARY_PATH" 2>&1 | \
+        extract_instructions > "$ORIGINAL_ASM"
+else
+    # Final fallback: try sym.$FUNC_NAME directly
+    r2 -q -e scr.color=0 -c "aaa; s sym.$FUNC_NAME; pdf" "$BINARY_PATH" 2>&1 | \
+        extract_instructions > "$ORIGINAL_ASM" 2>/dev/null || true
+fi
+
+if [[ ! -s "$ORIGINAL_ASM" ]]; then
+    echo "ERROR: Could not extract function $FUNC_NAME from original binary."
+    exit 1
+fi
+
+echo ""
+echo "--- Compiled assembly (from your code) ---"
+cat "$COMPILED_ASM"
+echo ""
+echo "--- Original assembly (from binary) ---"
+cat "$ORIGINAL_ASM"
+echo ""
+
+# Step 4: Compare
+echo "Step 4: Comparing..."
+echo ""
+
+# Normalize: remove addresses, symbols, just keep instruction mnemonics
+normalize() {
+    # Keep only the instruction mnemonic (first word of each line)
+    awk '{print $1}' | \
+    grep -v '^$' | \
+    grep -v '^;' | \
+    tr '[:upper:]' '[:lower:]' | \
+    # Normalize instruction variants (movq->mov, etc.)
+    sed 's/movq/mov/g; s/movl/mov/g; s/movb/mov/g; s/movw/mov/g' | \
+    sed 's/pushq/push/g; s/popq/pop/g' | \
+    sed 's/callq/call/g; s/jmpq/jmp/g; s/retq/ret/g'
+}
+
+NORM_COMPILED="$COMPARE_DIR/${FUNC_NAME}_compiled_norm.asm"
+NORM_ORIGINAL="$COMPARE_DIR/${FUNC_NAME}_original_norm.asm"
+
+cat "$COMPILED_ASM" | normalize > "$NORM_COMPILED"
+cat "$ORIGINAL_ASM" | normalize > "$NORM_ORIGINAL"
+
+echo "Normalized compiled:"
+cat "$NORM_COMPILED"
+echo ""
+echo "Normalized original:"
+cat "$NORM_ORIGINAL"
+echo ""
+
+if diff -q "$NORM_COMPILED" "$NORM_ORIGINAL" >/dev/null 2>&1; then
+    echo "=========================================="
+    echo "          MATCH - SUCCESS!"
+    echo "=========================================="
+    echo ""
+    echo "The compiled assembly matches the original binary."
+    echo "Function $FUNC_NAME has been successfully decompiled."
+    exit 0
+else
+    echo "=========================================="
+    echo "          MISMATCH - DIFF BELOW"
+    echo "=========================================="
+    echo ""
+    echo "The compiled assembly does NOT match the original."
+    echo ""
+    diff -u "$NORM_ORIGINAL" "$NORM_COMPILED" | head -50 || true
+    echo ""
+    echo "You should analyze the diff and adjust your C code to match."
+    exit 1
+fi

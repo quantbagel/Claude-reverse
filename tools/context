@@ -1,0 +1,109 @@
+#!/bin/bash
+# tools/context - Get contextual information for a function
+# Usage: tools/context <function_name>
+#
+# Returns information about:
+# - Functions called by this function
+# - Functions that call this function
+# - String references
+# - Global variable references
+# - Related already-decompiled functions
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Load config
+if [[ -f "$PROJECT_ROOT/config.sh" ]]; then
+    source "$PROJECT_ROOT/config.sh"
+else
+    echo "ERROR: config.sh not found. Run init.sh first."
+    exit 1
+fi
+
+if [[ -z "$1" ]]; then
+    echo "ERROR: No function specified."
+    echo "Usage: tools/context <function_name>"
+    exit 1
+fi
+
+FUNC_NAME="$1"
+
+if [[ ! -f "$BINARY_PATH" ]]; then
+    echo "ERROR: Binary not found at $BINARY_PATH"
+    exit 1
+fi
+
+echo "=== Context for function: $FUNC_NAME ==="
+echo ""
+
+# Create r2 script for analysis
+R2_SCRIPT=$(mktemp)
+cat > "$R2_SCRIPT" << 'EOF'
+aaa
+EOF
+
+# Function to run r2 commands
+run_r2() {
+    r2 -q -e scr.color=0 -c "$1" "$BINARY_PATH" 2>/dev/null
+}
+
+# Get function address
+echo "--- Function Info ---"
+run_r2 "aaa; afl~$FUNC_NAME" | head -5
+
+echo ""
+echo "--- Functions Called (callees) ---"
+# Get cross-references FROM this function
+run_r2 "aaa; s sym.$FUNC_NAME; axf" 2>/dev/null | grep -E "CALL|JMP" | head -20 || \
+run_r2 "aaa; afl~$FUNC_NAME" | head -1 | awk '{print $1}' | xargs -I {} sh -c "r2 -q -e scr.color=0 -c 'aaa; s {}; axf' '$BINARY_PATH' 2>/dev/null" | grep -E "CALL|JMP" | head -20 || \
+echo "(none found or unable to analyze)"
+
+echo ""
+echo "--- Functions That Call This (callers) ---"
+# Get cross-references TO this function
+run_r2 "aaa; s sym.$FUNC_NAME; axt" 2>/dev/null | head -20 || \
+echo "(none found or unable to analyze)"
+
+echo ""
+echo "--- String References ---"
+# Look for string references in the function
+run_r2 "aaa; s sym.$FUNC_NAME; pdf" 2>/dev/null | grep -E 'str\.|"' | head -10 || \
+echo "(no string references found)"
+
+echo ""
+echo "--- Already Decompiled Related Functions ---"
+# Check if any called functions have been decompiled
+if [[ -f "$PROJECT_ROOT/state/functions.json" ]]; then
+    # Get list of matched functions
+    MATCHED=$(jq -r 'to_entries[] | select(.value.status == "matched") | .key' "$PROJECT_ROOT/state/functions.json" 2>/dev/null || echo "")
+
+    if [[ -n "$MATCHED" ]]; then
+        echo "These related functions have already been decompiled:"
+        for func in $MATCHED; do
+            # Check if this function calls or is called by our target
+            if run_r2 "aaa; s sym.$FUNC_NAME; axf" 2>/dev/null | grep -q "$func"; then
+                echo "  - $func (called by $FUNC_NAME)"
+                # Show the decompiled source if available
+                SOURCE=$(jq -r ".[\"$func\"].source_file // empty" "$PROJECT_ROOT/state/functions.json" 2>/dev/null)
+                if [[ -n "$SOURCE" ]] && [[ -f "$PROJECT_ROOT/$SOURCE" ]]; then
+                    echo "    Source: $SOURCE"
+                fi
+            fi
+        done
+    else
+        echo "(no functions have been matched yet)"
+    fi
+else
+    echo "(state not initialized - run init.sh first)"
+fi
+
+echo ""
+echo "--- Decompiler Hints (r2 pseudocode) ---"
+# Show r2's decompiler output as a hint (if available)
+run_r2 "aaa; s sym.$FUNC_NAME; pdc" 2>/dev/null | head -50 || \
+echo "(r2 pseudocode not available - install r2ghidra for better output)"
+
+echo ""
+echo "=== End of context ==="

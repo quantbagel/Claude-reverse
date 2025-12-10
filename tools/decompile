@@ -1,0 +1,116 @@
+#!/bin/bash
+# tools/decompile - Get decompiler output (pseudocode) for a function
+# Usage: tools/decompile <function_name_or_address>
+#
+# Uses Ghidra headless or r2's pdc for C++ pseudocode hints.
+# This gives Claude a starting point rather than raw assembly.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Load config
+if [[ -f "$PROJECT_ROOT/config.sh" ]]; then
+    source "$PROJECT_ROOT/config.sh"
+else
+    echo "ERROR: config.sh not found. Run init.sh first."
+    exit 1
+fi
+
+if [[ -z "$1" ]]; then
+    echo "ERROR: No function specified."
+    echo "Usage: tools/decompile <function_name_or_address>"
+    exit 1
+fi
+
+FUNC="$1"
+
+if [[ ! -f "$BINARY_PATH" ]]; then
+    echo "ERROR: Binary not found at $BINARY_PATH"
+    exit 1
+fi
+
+echo "=== Decompiled pseudocode for $FUNC ==="
+echo ""
+
+# Check for Ghidra headless
+GHIDRA_HEADLESS=""
+if [[ -n "$GHIDRA_HOME" ]] && [[ -f "$GHIDRA_HOME/support/analyzeHeadless" ]]; then
+    GHIDRA_HEADLESS="$GHIDRA_HOME/support/analyzeHeadless"
+elif command -v analyzeHeadless &>/dev/null; then
+    GHIDRA_HEADLESS="analyzeHeadless"
+fi
+
+# Try Ghidra first (better C++ decompilation)
+if [[ -n "$GHIDRA_HEADLESS" ]]; then
+    echo "(Using Ghidra decompiler)"
+    echo ""
+
+    # Create temp project directory
+    GHIDRA_PROJECT="$PROJECT_ROOT/.ghidra_project"
+    mkdir -p "$GHIDRA_PROJECT"
+
+    # Create a script to export decompilation
+    SCRIPT_FILE=$(mktemp --suffix=.py)
+    cat > "$SCRIPT_FILE" << 'GHIDRA_SCRIPT'
+# Ghidra script to decompile a function
+from ghidra.app.decompiler import DecompInterface
+from ghidra.util.task import ConsoleTaskMonitor
+
+func_name = getScriptArgs()[0] if len(getScriptArgs()) > 0 else None
+
+decomp = DecompInterface()
+decomp.openProgram(currentProgram)
+
+if func_name:
+    # Find function by name
+    fm = currentProgram.getFunctionManager()
+    funcs = list(fm.getFunctions(True))
+
+    target = None
+    for f in funcs:
+        if func_name in f.getName() or func_name in str(f.getEntryPoint()):
+            target = f
+            break
+
+    if target:
+        results = decomp.decompileFunction(target, 60, ConsoleTaskMonitor())
+        if results.depiledFunction():
+            print(results.getDecompiledFunction().getC())
+        else:
+            print("// Decompilation failed")
+    else:
+        print("// Function not found: " + func_name)
+else:
+    print("// No function specified")
+GHIDRA_SCRIPT
+
+    # Run Ghidra headless
+    timeout 120 "$GHIDRA_HEADLESS" "$GHIDRA_PROJECT" "TempProject" \
+        -import "$BINARY_PATH" \
+        -postScript "$SCRIPT_FILE" "$FUNC" \
+        -deleteProject \
+        2>/dev/null | grep -v "^INFO\|^WARN\|^Importing\|^Auto-analysis" || {
+            echo "(Ghidra failed, falling back to r2)"
+            rm -f "$SCRIPT_FILE"
+        }
+
+    rm -f "$SCRIPT_FILE"
+else
+    echo "(Ghidra not found, using r2 pseudocode)"
+    echo ""
+fi
+
+# Fallback or additional: r2 pseudocode
+echo ""
+echo "--- r2 pseudocode (pdc) ---"
+r2 -q -e scr.color=0 -c "aaa; s sym.$FUNC; pdc" "$BINARY_PATH" 2>&1 | \
+    grep -v "^INFO\|^WARN" || \
+r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>&1 | \
+    head -1 | awk '{print $1}' | \
+    xargs -I {} r2 -q -e scr.color=0 -c "aaa; s {}; pdc" "$BINARY_PATH" 2>&1 | \
+    grep -v "^INFO\|^WARN"
+
+echo ""
+echo "=== End of decompilation ==="

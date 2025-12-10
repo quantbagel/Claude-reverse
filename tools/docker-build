@@ -1,0 +1,30 @@
+#!/bin/bash
+# tools/docker-build - Compile C/C++ inside Docker (Linux x86_64)
+# Usage: tools/docker-build <source_file.c|cpp> [function_name]
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+if [[ -z "$1" ]]; then
+    echo "BUILD FAILED: No source file specified."
+    echo "Usage: tools/docker-build <source_file.c|cpp>"
+    exit 1
+fi
+
+SOURCE_FILE="$1"
+FUNC_NAME="${2:-}"
+
+# Convert to path relative to project root
+if [[ "$SOURCE_FILE" == /* ]]; then
+    SOURCE_FILE="${SOURCE_FILE#$PROJECT_ROOT/}"
+fi
+
+echo "=== Building $SOURCE_FILE (Linux x86_64 via Docker) ==="
+
+docker run --rm --platform linux/amd64 \
+    -v "$PROJECT_ROOT:/project" \
+    -w /project \
+    decomp-env \
+    /project/tools/build "$SOURCE_FILE" "$FUNC_NAME"

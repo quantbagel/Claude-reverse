@@ -1,0 +1,140 @@
+#!/bin/bash
+# tools/list - List functions and their decompilation status
+# Usage: tools/list [filter]
+#
+# Filters:
+#   all       - Show all functions (default)
+#   unmatched - Show only unmatched functions
+#   matched   - Show only matched functions
+#   failed    - Show functions that failed (attempts >= 10)
+#   next      - Show next recommended function to attempt
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Load config
+if [[ -f "$PROJECT_ROOT/config.sh" ]]; then
+    source "$PROJECT_ROOT/config.sh"
+else
+    echo "ERROR: config.sh not found. Run init.sh first."
+    exit 1
+fi
+
+FILTER="${1:-all}"
+STATE_FILE="$PROJECT_ROOT/state/functions.json"
+
+if [[ ! -f "$STATE_FILE" ]]; then
+    echo "ERROR: State file not found. Run init.sh first to analyze the binary."
+    exit 1
+fi
+
+# Function to format output
+print_header() {
+    printf "%-30s %-12s %-10s %-8s %-10s\n" "FUNCTION" "STATUS" "SIZE" "ATTEMPTS" "SCORE"
+    printf "%-30s %-12s %-10s %-8s %-10s\n" "--------" "------" "----" "--------" "-----"
+}
+
+print_row() {
+    local name="$1"
+    local status="$2"
+    local size="$3"
+    local attempts="$4"
+    local score="$5"
+
+    # Truncate long names
+    if [[ ${#name} -gt 28 ]]; then
+        name="${name:0:25}..."
+    fi
+
+    printf "%-30s %-12s %-10s %-8s %-10s\n" "$name" "$status" "$size" "$attempts" "$score"
+}
+
+case "$FILTER" in
+    all)
+        echo "=== All Functions ==="
+        echo ""
+        print_header
+        jq -r 'to_entries | sort_by(.value.complexity) | .[] | [.key, .value.status, .value.size, .value.attempts, .value.complexity] | @tsv' "$STATE_FILE" | \
+        while IFS=$'\t' read -r name status size attempts score; do
+            print_row "$name" "$status" "$size" "$attempts" "$score"
+        done
+        ;;
+
+    unmatched)
+        echo "=== Unmatched Functions ==="
+        echo ""
+        print_header
+        jq -r 'to_entries | map(select(.value.status == "unmatched")) | sort_by(.value.complexity) | .[] | [.key, .value.status, .value.size, .value.attempts, .value.complexity] | @tsv' "$STATE_FILE" | \
+        while IFS=$'\t' read -r name status size attempts score; do
+            print_row "$name" "$status" "$size" "$attempts" "$score"
+        done
+        ;;
+
+    matched)
+        echo "=== Matched Functions ==="
+        echo ""
+        print_header
+        jq -r 'to_entries | map(select(.value.status == "matched")) | sort_by(.value.complexity) | .[] | [.key, .value.status, .value.size, .value.attempts, .value.complexity] | @tsv' "$STATE_FILE" | \
+        while IFS=$'\t' read -r name status size attempts score; do
+            print_row "$name" "$status" "$size" "$attempts" "$score"
+        done
+        ;;
+
+    failed)
+        echo "=== Failed Functions (attempts >= 10) ==="
+        echo ""
+        print_header
+        jq -r 'to_entries | map(select(.value.attempts >= 10)) | sort_by(.value.complexity) | .[] | [.key, .value.status, .value.size, .value.attempts, .value.complexity] | @tsv' "$STATE_FILE" | \
+        while IFS=$'\t' read -r name status size attempts score; do
+            print_row "$name" "$status" "$size" "$attempts" "$score"
+        done
+        ;;
+
+    next)
+        echo "=== Next Recommended Function ==="
+        echo ""
+        # Get next function from scorer
+        if [[ -f "$PROJECT_ROOT/scorer.py" ]]; then
+            NEXT=$(python3 "$PROJECT_ROOT/scorer.py" 2>/dev/null | head -1)
+            if [[ -n "$NEXT" ]]; then
+                echo "Recommended: $NEXT"
+                echo ""
+                jq -r ".[\"$NEXT\"] | \"Address: \(.address)\nSize: \(.size) bytes\nInstructions: \(.instructions)\nAttempts: \(.attempts)\nComplexity: \(.complexity)\"" "$STATE_FILE"
+            else
+                echo "No functions available to attempt."
+            fi
+        else
+            # Fallback: just get the simplest unmatched function
+            NEXT=$(jq -r 'to_entries | map(select(.value.status == "unmatched" and .value.attempts < 10)) | sort_by(.value.complexity) | .[0].key // empty' "$STATE_FILE")
+            if [[ -n "$NEXT" ]]; then
+                echo "Recommended (simple heuristic): $NEXT"
+                echo ""
+                jq -r ".[\"$NEXT\"]" "$STATE_FILE"
+            else
+                echo "No functions available to attempt."
+            fi
+        fi
+        ;;
+
+    *)
+        echo "ERROR: Unknown filter '$FILTER'"
+        echo "Usage: tools/list [all|unmatched|matched|failed|next]"
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "--- Summary ---"
+TOTAL=$(jq 'length' "$STATE_FILE")
+MATCHED_COUNT=$(jq '[.[] | select(.status == "matched")] | length' "$STATE_FILE")
+UNMATCHED_COUNT=$(jq '[.[] | select(.status == "unmatched")] | length' "$STATE_FILE")
+FAILED_COUNT=$(jq '[.[] | select(.attempts >= 10)] | length' "$STATE_FILE")
+
+echo "Total: $TOTAL | Matched: $MATCHED_COUNT | Unmatched: $UNMATCHED_COUNT | Failed: $FAILED_COUNT"
+
+if [[ $TOTAL -gt 0 ]]; then
+    PERCENT=$((MATCHED_COUNT * 100 / TOTAL))
+    echo "Progress: ${PERCENT}% complete"
+fi

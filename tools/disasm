@@ -1,0 +1,73 @@
+#!/bin/bash
+# tools/disasm - Extract disassembly for a function using radare2
+# Usage: tools/disasm <function_name_or_address>
+#
+# This tool extracts the disassembly of a function from the target binary.
+# It uses radare2 to analyze the binary and extract the function's assembly code.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Load config
+if [[ -f "$PROJECT_ROOT/config.sh" ]]; then
+    source "$PROJECT_ROOT/config.sh"
+else
+    echo "ERROR: config.sh not found. Run init.sh first."
+    exit 1
+fi
+
+if [[ -z "$1" ]]; then
+    echo "ERROR: No function specified."
+    echo "Usage: tools/disasm <function_name_or_address>"
+    echo "Examples:"
+    echo "  tools/disasm main"
+    echo "  tools/disasm 0x1000"
+    exit 1
+fi
+
+FUNC="$1"
+
+if [[ ! -f "$BINARY_PATH" ]]; then
+    echo "ERROR: Binary not found at $BINARY_PATH"
+    exit 1
+fi
+
+# Check if input is an address (starts with 0x) or a function name
+if [[ "$FUNC" == 0x* ]]; then
+    # It's an address - seek to it and print the function
+    R2_CMD="s $FUNC; af; pdf"
+else
+    # It's a function name - analyze and print by name
+    R2_CMD="aaa; s sym.$FUNC || s $FUNC; pdf"
+fi
+
+echo "=== Disassembly of $FUNC ==="
+echo ""
+
+# Run radare2 in quiet mode with analysis
+r2 -q -e scr.color=0 -c "$R2_CMD" "$BINARY_PATH" 2>/dev/null || {
+    # If that failed, try with full analysis
+    echo "Note: Initial lookup failed, trying with full analysis..."
+    r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -5
+
+    # Try to find the function
+    ADDR=$(r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -1 | awk '{print $1}')
+
+    if [[ -n "$ADDR" ]]; then
+        echo ""
+        echo "Found function at $ADDR, disassembling..."
+        echo ""
+        r2 -q -e scr.color=0 -c "aaa; s $ADDR; pdf" "$BINARY_PATH" 2>/dev/null
+    else
+        echo "ERROR: Function '$FUNC' not found in binary."
+        echo ""
+        echo "Available functions (first 20):"
+        r2 -q -e scr.color=0 -c "aaa; afl" "$BINARY_PATH" 2>/dev/null | head -20
+        exit 1
+    fi
+}
+
+echo ""
+echo "=== End of disassembly ==="

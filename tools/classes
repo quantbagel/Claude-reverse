@@ -1,0 +1,48 @@
+#!/bin/bash
+# tools/classes - Analyze C++ class structures
+# Usage: tools/classes [class_name]
+#
+# Extracts class information from C++ binaries:
+# - Virtual tables (vtables)
+# - Class hierarchies
+# - Member functions
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+if [[ -f "$PROJECT_ROOT/config.sh" ]]; then
+    source "$PROJECT_ROOT/config.sh"
+fi
+
+if [[ -z "$BINARY_PATH" ]] || [[ ! -f "$BINARY_PATH" ]]; then
+    echo "ERROR: BINARY_PATH not set or file not found"
+    exit 1
+fi
+
+CLASS_NAME="${1:-}"
+
+echo "=== C++ Class Analysis ==="
+echo ""
+
+if [[ -n "$CLASS_NAME" ]]; then
+    echo "--- Methods for class: $CLASS_NAME ---"
+    nm "$BINARY_PATH" 2>/dev/null | c++filt | grep -i "$CLASS_NAME" | head -50
+    echo ""
+
+    echo "--- VTable for $CLASS_NAME ---"
+    nm "$BINARY_PATH" 2>/dev/null | c++filt | grep -i "vtable.*$CLASS_NAME" | head -10
+    echo ""
+
+    echo "--- RTTI typeinfo ---"
+    nm "$BINARY_PATH" 2>/dev/null | c++filt | grep -i "typeinfo.*$CLASS_NAME" | head -10
+else
+    echo "--- All vtables found ---"
+    nm "$BINARY_PATH" 2>/dev/null | c++filt | grep "vtable for" | head -50
+    echo ""
+    echo "(showing first 50 - use 'tools/classes <classname>' for specific class)"
+fi
+
+echo ""
+echo "=== End of class analysis ==="
