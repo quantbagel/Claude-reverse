@@ -1,0 +1,30 @@
+⚠️  [BashTool] Pre-flight check is taking longer than expected. Run with ANTHROPIC_LOG=debug to check for failed or slow API requests.
+**MATCH - SUCCESS!**
+
+The decompilation is complete. The existing code in `src/method.feature_outdoor_riverst.virtual_40.cpp` already matches the target.
+
+## Summary
+
+**Target:** `method.feature_outdoor_riverst.virtual_40` (at `0x00a10c10`)
+
+**Analysis:**
+- This is a **virtual destructor** (D2 - base object destructor) for the `feature_outdoor_riverst` class
+- The function is only 12 bytes - very simple
+- It sets the vtable pointer to `feature_outdoor_riverst`'s vtable (`0x1543150`)
+- Then tail-calls the parent class (`featurest`) destructor at `0xa10b60`
+
+**Assembly:**
+```asm
+mov qword [rdi], 0x1543150    ; set vtable to feature_outdoor_riverst's vtable
+jmp 0xa10b60                  ; tail-call parent destructor
+```
+
+**Decompiled C++:**
+```cpp
+extern "C" void _ZN23feature_outdoor_riverstD2Ev(feature_outdoor_riverst* _this) {
+    // Set vtable to feature_outdoor_riverst vtable (slot 2 is first virtual function)
+    *(void**)_this = &_ZTV23feature_outdoor_riverst[2];
+    // Tail call parent destructor
+    _ZN9featurestD2Ev(_this);
+}
+```

@@ -1,0 +1,28 @@
+The code matches. The existing implementation in `src/method.feature_outdoor_riverst.virtual_40.cpp` successfully decompiles the target function.
+
+## Summary
+
+**TARGET: `method.feature_outdoor_riverst.virtual_40`** - **MATCH**
+
+The function at `0x00a10c10` is the non-deleting virtual destructor (`~feature_outdoor_riverst()`) for the `feature_outdoor_riverst` class. The assembly is very simple (12 bytes total):
+
+```asm
+mov qword [rdi], 0x1543150   ; set vtable to feature_outdoor_riverst's vtable
+jmp 0xa10b60                  ; tail call to parent class destructor
+```
+
+The decompiled C++ code:
+```cpp
+extern "C" void _ZN23feature_outdoor_riverstD2Ev(feature_outdoor_riverst* _this) {
+    // Set vtable to feature_outdoor_riverst vtable
+    *(void**)_this = &_ZTV23feature_outdoor_riverst[2];
+    // Tail call parent destructor
+    _ZN9featurestD2Ev(_this);
+}
+```
+
+This is the standard pattern for a derived class destructor that:
+1. Resets the vtable pointer to the derived class's vtable
+2. Calls the parent class destructor
+
+Since `feature_outdoor_riverst` appears to add no new members that require cleanup, its destructor simply delegates to the parent class.

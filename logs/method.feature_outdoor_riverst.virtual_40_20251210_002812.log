@@ -1,0 +1,26 @@
+**MATCH - SUCCESS!**
+
+The existing code already matches the original binary. The function `method.feature_outdoor_riverst.virtual_40` is the non-deleting virtual destructor for the `feature_outdoor_riverst` class.
+
+## Summary
+
+The decompiled function at `src/method.feature_outdoor_riverst.virtual_40.cpp`:
+
+```cpp
+extern "C" void _ZN23feature_outdoor_riverstD2Ev(feature_outdoor_riverst* _this) {
+    // Set vtable to feature_outdoor_riverst vtable (slot 2 is first virtual function)
+    *(void**)_this = &_ZTV23feature_outdoor_riverst[2];
+    // Tail call parent destructor
+    _ZN9featurestD2Ev(_this);
+}
+```
+
+This is the `~feature_outdoor_riverst()` destructor which:
+1. Sets the vtable pointer at `this` to the `feature_outdoor_riverst` vtable
+2. Tail-calls the parent class (`featurest`) destructor
+
+The assembly:
+- `mov qword [rdi], 0x1543150` - Sets the vtable
+- `jmp 0xa10b60` - Tail-calls `featurest::~featurest()`
+
+The normalized comparison (`mov`, `jmp`) confirms this is a **perfect match**.

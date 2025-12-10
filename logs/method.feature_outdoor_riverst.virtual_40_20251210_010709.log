@@ -1,0 +1,32 @@
+**MATCH - SUCCESS!**
+
+The decompilation is complete. The function `method.feature_outdoor_riverst.virtual_40` matches the original binary.
+
+## Summary
+
+The target function is a **non-deleting virtual destructor** for `feature_outdoor_riverst`. The assembly shows:
+
+```asm
+mov qword [rdi], vtable.feature_outdoor_riverst.0   ; Set vtable pointer
+jmp fcn.00a10b60                                     ; Tail call to parent destructor
+```
+
+The decompiled C++ code at `src/method.feature_outdoor_riverst.virtual_40.cpp`:
+
+```cpp
+extern "C" void _ZN9featurestD2Ev(void* _this);  // Parent destructor
+
+struct feature_outdoor_riverst;
+extern "C" void* _ZTV23feature_outdoor_riverst[];  // vtable
+
+extern "C" void _ZN23feature_outdoor_riverstD2Ev(feature_outdoor_riverst* _this) {
+    // Set vtable to feature_outdoor_riverst vtable (slot 2 is first virtual function)
+    *(void**)_this = &_ZTV23feature_outdoor_riverst[2];
+    // Tail call parent destructor
+    _ZN9featurestD2Ev(_this);
+}
+```
+
+This is a typical C++ compiler-generated destructor pattern for a derived class that:
+1. Doesn't have any additional members to clean up
+2. Calls the parent class's destructor after setting the vtable back to its own type (in case of virtual dispatch during destruction)

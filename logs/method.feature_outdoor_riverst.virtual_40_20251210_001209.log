@@ -1,0 +1,30 @@
+**MATCH - SUCCESS!**
+
+The existing implementation is correct. The function `method.feature_outdoor_riverst.virtual_40` has been successfully decompiled and verified.
+
+## Summary
+
+The target function is the **non-deleting virtual destructor** (D2 destructor) for `feature_outdoor_riverst`. Here's the decompiled code:
+
+```cpp
+// Forward declaration of parent destructor
+extern "C" void _ZN9featurestD2Ev(void* _this);
+
+struct feature_outdoor_riverst;
+
+// vtable pointer
+extern "C" void* _ZTV23feature_outdoor_riverst[];
+
+extern "C" void _ZN23feature_outdoor_riverstD2Ev(feature_outdoor_riverst* _this) {
+    // Set vtable to feature_outdoor_riverst vtable (slot 2 is first virtual function)
+    *(void**)_this = &_ZTV23feature_outdoor_riverst[2];
+    // Tail call parent destructor
+    _ZN9featurestD2Ev(_this);
+}
+```
+
+The assembly output matches:
+- `mov qword [rdi], vtable` - Sets the vtable pointer to the derived class vtable
+- `jmp fcn.00a10b60` - Tail-calls to the base class (`featurest`) destructor
+
+This is a classic C++ destructor pattern where the derived class destructor sets its own vtable pointer before calling the parent class destructor.

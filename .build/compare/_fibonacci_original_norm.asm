@@ -1,0 +1,16 @@
+]!
+stp
+cmp
+mov
+mov
+mov
+sub
+bl
+mov
+sub
+add
+cmp
+mov
+add
+ldp
+ret
