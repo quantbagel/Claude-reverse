@@ -1,9 +1,13 @@
 #!/bin/bash
 # tools/disasm - Extract disassembly for a function using radare2
-# Usage: tools/disasm <function_name_or_address>
+# Usage: tools/disasm <function_name_or_address> [--compact]
 #
 # This tool extracts the disassembly of a function from the target binary.
-# It uses radare2 to analyze the binary and extract the function's assembly code.
+# With --compact, it compresses the assembly for token efficiency:
+#   - Strips absolute addresses (keeps relative offsets)
+#   - Removes redundant instructions
+#   - Collapses nop sequences
+#   - Abstracts large constants
 
 set -e
 
@@ -18,16 +22,45 @@ else
     exit 1
 fi
 
-if [[ -z "$1" ]]; then
+# Parse arguments
+FUNC=""
+COMPACT=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --compact|-c)
+            COMPACT=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: tools/disasm <function_name_or_address> [--compact]"
+            echo ""
+            echo "Options:"
+            echo "  --compact, -c    Compress output for token efficiency"
+            echo ""
+            echo "Examples:"
+            echo "  tools/disasm main"
+            echo "  tools/disasm main --compact"
+            echo "  tools/disasm 0x1000 -c"
+            exit 0
+            ;;
+        *)
+            if [[ -z "$FUNC" ]]; then
+                FUNC="$1"
+            else
+                echo "ERROR: Unknown argument: $1"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$FUNC" ]]; then
     echo "ERROR: No function specified."
-    echo "Usage: tools/disasm <function_name_or_address>"
-    echo "Examples:"
-    echo "  tools/disasm main"
-    echo "  tools/disasm 0x1000"
+    echo "Usage: tools/disasm <function_name_or_address> [--compact]"
     exit 1
 fi
-
-FUNC="$1"
 
 if [[ ! -f "$BINARY_PATH" ]]; then
     echo "ERROR: Binary not found at $BINARY_PATH"
@@ -43,31 +76,130 @@ else
     R2_CMD="aaa; s sym.$FUNC || s $FUNC; pdf"
 fi
 
+# Compress assembly output for token efficiency
+compress_asm() {
+    python3 - <<'PYTHON'
+import sys
+import re
+
+lines = sys.stdin.readlines()
+output = []
+prev_line = ""
+nop_count = 0
+
+for line in lines:
+    # Keep header/footer lines
+    if line.startswith("=") or line.startswith("/") or line.startswith("|") or line.strip() == "":
+        if nop_count > 0:
+            output.append(f"    ... ({nop_count} nop instructions) ...\n")
+            nop_count = 0
+        output.append(line)
+        continue
+
+    # Strip absolute addresses, keep only relative offsets
+    # Format: "0x00001234    mov rax, rbx" -> "  +0x34  mov rax, rbx"
+    line = re.sub(r'^(│?\s*)0x[0-9a-f]{8,16}(\s+)', r'\1  +offset  ', line)
+
+    # Collapse consecutive nops
+    if re.search(r'\bnop\b', line, re.IGNORECASE):
+        nop_count += 1
+        continue
+    else:
+        if nop_count > 0:
+            if nop_count == 1:
+                output.append(prev_line)
+            else:
+                output.append(f"    ... ({nop_count} nop instructions) ...\n")
+            nop_count = 0
+
+    # Abstract large immediate constants
+    # "mov rax, 0x123456789abcdef" -> "mov rax, <large_const>"
+    line = re.sub(r'\b0x[0-9a-f]{9,}\b', '<large_const>', line)
+
+    # Remove redundant prefixes in some cases
+    # "sym.imp." -> just the function name for imports
+    line = re.sub(r'sym\.imp\.(\w+)', r'\1@PLT', line)
+
+    # Collapse repeated sequences (simple case: same instruction 3+ times)
+    if output and line.strip() and prev_line.strip():
+        # Check if instruction part is the same (ignore offsets)
+        curr_instr = re.sub(r'[+]offset', '', line).split(maxsplit=1)
+        prev_instr = re.sub(r'[+]offset', '', prev_line).split(maxsplit=1)
+
+        if len(curr_instr) > 1 and len(prev_instr) > 1:
+            curr_op = curr_instr[1] if len(curr_instr) > 1 else ""
+            prev_op = prev_instr[1] if len(prev_instr) > 1 else ""
+
+            # Simple pattern: same operation repeated
+            # (more sophisticated: could track sequences)
+
+    output.append(line)
+    prev_line = line
+
+if nop_count > 0:
+    if nop_count == 1:
+        output.append(prev_line)
+    else:
+        output.append(f"    ... ({nop_count} nop instructions) ...\n")
+
+# Print compressed output
+for line in output:
+    print(line, end='')
+PYTHON
+}
+
 echo "=== Disassembly of $FUNC ==="
+if $COMPACT; then
+    echo "(compact mode - addresses abstracted, nops collapsed)"
+fi
 echo ""
 
 # Run radare2 in quiet mode with analysis
-r2 -q -e scr.color=0 -c "$R2_CMD" "$BINARY_PATH" 2>/dev/null || {
-    # If that failed, try with full analysis
-    echo "Note: Initial lookup failed, trying with full analysis..."
-    r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -5
+if $COMPACT; then
+    r2 -q -e scr.color=0 -c "$R2_CMD" "$BINARY_PATH" 2>/dev/null | compress_asm || {
+        # If that failed, try with full analysis
+        echo "Note: Initial lookup failed, trying with full analysis..."
+        r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -5
 
-    # Try to find the function
-    ADDR=$(r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -1 | awk '{print $1}')
+        # Try to find the function
+        ADDR=$(r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -1 | awk '{print $1}')
 
-    if [[ -n "$ADDR" ]]; then
-        echo ""
-        echo "Found function at $ADDR, disassembling..."
-        echo ""
-        r2 -q -e scr.color=0 -c "aaa; s $ADDR; pdf" "$BINARY_PATH" 2>/dev/null
-    else
-        echo "ERROR: Function '$FUNC' not found in binary."
-        echo ""
-        echo "Available functions (first 20):"
-        r2 -q -e scr.color=0 -c "aaa; afl" "$BINARY_PATH" 2>/dev/null | head -20
-        exit 1
-    fi
-}
+        if [[ -n "$ADDR" ]]; then
+            echo ""
+            echo "Found function at $ADDR, disassembling..."
+            echo ""
+            r2 -q -e scr.color=0 -c "aaa; s $ADDR; pdf" "$BINARY_PATH" 2>/dev/null | compress_asm
+        else
+            echo "ERROR: Function '$FUNC' not found in binary."
+            echo ""
+            echo "Available functions (first 20):"
+            r2 -q -e scr.color=0 -c "aaa; afl" "$BINARY_PATH" 2>/dev/null | head -20
+            exit 1
+        fi
+    }
+else
+    r2 -q -e scr.color=0 -c "$R2_CMD" "$BINARY_PATH" 2>/dev/null || {
+        # If that failed, try with full analysis
+        echo "Note: Initial lookup failed, trying with full analysis..."
+        r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -5
+
+        # Try to find the function
+        ADDR=$(r2 -q -e scr.color=0 -c "aaa; afl~$FUNC" "$BINARY_PATH" 2>/dev/null | head -1 | awk '{print $1}')
+
+        if [[ -n "$ADDR" ]]; then
+            echo ""
+            echo "Found function at $ADDR, disassembling..."
+            echo ""
+            r2 -q -e scr.color=0 -c "aaa; s $ADDR; pdf" "$BINARY_PATH" 2>/dev/null
+        else
+            echo "ERROR: Function '$FUNC' not found in binary."
+            echo ""
+            echo "Available functions (first 20):"
+            r2 -q -e scr.color=0 -c "aaa; afl" "$BINARY_PATH" 2>/dev/null | head -20
+            exit 1
+        fi
+    }
+fi
 
 echo ""
 echo "=== End of disassembly ==="

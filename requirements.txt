@@ -1,0 +1,12 @@
+# Core dependencies
+numpy>=1.20.0
+
+# For semantic search (choose one):
+# Option 1: sentence-transformers (best quality, runs locally)
+sentence-transformers>=2.2.0
+
+# Option 2: scikit-learn (fallback TF-IDF, lighter weight)
+scikit-learn>=1.0.0
+
+# Optional: OpenAI for cloud embeddings
+# openai>=1.0.0

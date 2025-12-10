@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+tools/find-similar - Find functions similar to a target function
+
+Uses the semantic index built by tools/index-functions to find similar functions
+based on assembly code patterns. This helps provide relevant examples to Claude.
+
+Usage:
+    tools/find-similar <function_name> [--top N] [--matched-only] [--show-code]
+
+Examples:
+    tools/find-similar parse_input
+    tools/find-similar parse_input --top 5 --matched-only --show-code
+"""
+
+import json
+import sys
+import os
+import subprocess
+from pathlib import Path
+import argparse
+import numpy as np
+
+# Find project root
+SCRIPT_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = SCRIPT_DIR.parent
+STATE_FILE = PROJECT_ROOT / "state" / "functions.json"
+EMBEDDINGS_FILE = PROJECT_ROOT / "state" / "embeddings.npz"
+CONFIG_FILE = PROJECT_ROOT / "state" / "embedding_config.json"
+
+
+def load_state():
+    """Load functions state."""
+    if not STATE_FILE.exists():
+        print(f"ERROR: State file not found at {STATE_FILE}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(STATE_FILE) as f:
+        return json.load(f)
+
+
+def load_index():
+    """Load the embeddings index."""
+    if not EMBEDDINGS_FILE.exists():
+        print("ERROR: Index not found. Run 'tools/index-functions' first.", file=sys.stderr)
+        sys.exit(1)
+
+    data = np.load(EMBEDDINGS_FILE, allow_pickle=True)
+    embeddings = data['embeddings']
+    func_names = data['func_names'].tolist()
+
+    return embeddings, func_names
+
+
+
+
+
+
+def cosine_similarity(a, b):
+    """Compute cosine similarity between two vectors."""
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+
+def find_similar(target_name, embeddings, func_names, top_k=5):
+    """Find most similar functions to target."""
+    # Find target in index
+    if target_name not in func_names:
+        print(f"ERROR: Function '{target_name}' not in index.", file=sys.stderr)
+        print("Run 'tools/index-functions --force' to rebuild index.", file=sys.stderr)
+        sys.exit(1)
+
+    target_idx = func_names.index(target_name)
+    target_emb = embeddings[target_idx]
+
+    # Compute similarities
+    similarities = []
+    for i, emb in enumerate(embeddings):
+        if i == target_idx:
+            continue  # Skip self
+        sim = cosine_similarity(target_emb, emb)
+        similarities.append((func_names[i], sim))
+
+    # Sort by similarity (descending)
+    similarities.sort(key=lambda x: x[1], reverse=True)
+
+    return similarities[:top_k]
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Find similar functions')
+    parser.add_argument('function', help='Target function name')
+    parser.add_argument('--top', type=int, default=5, help='Number of results (default: 5)')
+    parser.add_argument('--matched-only', action='store_true', help='Only show matched functions')
+    parser.add_argument('--show-code', action='store_true', help='Show source code of matched functions')
+    parser.add_argument('--binary', help='Override binary path from config')
+    args = parser.parse_args()
+
+    # Load state and index
+    state = load_state()
+    embeddings, func_names = load_index()
+
+    print(f"=== Finding functions similar to: {args.function} ===")
+    print()
+
+    # Find similar functions
+    similar = find_similar(args.function, embeddings, func_names, top_k=args.top * 3)
+
+    # Filter by matched status if requested
+    if args.matched_only:
+        similar = [(name, sim) for name, sim in similar if state.get(name, {}).get('status') == 'matched']
+
+    # Limit to top K
+    similar = similar[:args.top]
+
+    if not similar:
+        if args.matched_only:
+            print("No similar matched functions found.")
+            print("Try without --matched-only to see unmatched similar functions.")
+        else:
+            print("No similar functions found.")
+        return
+
+    # Display results
+    print(f"Top {len(similar)} similar functions:")
+    print()
+
+    for i, (name, similarity) in enumerate(similar, 1):
+        func_data = state.get(name, {})
+        status = func_data.get('status', 'unknown')
+        complexity = func_data.get('complexity', 0)
+        instructions = func_data.get('instructions', 0)
+
+        status_marker = "✓" if status == "matched" else " "
+        print(f"{i}. [{status_marker}] {name}")
+        print(f"   Similarity: {similarity:.3f}")
+        print(f"   Complexity: {complexity:.2f} | Instructions: {instructions} | Status: {status}")
+
+        if status == "matched" and args.show_code:
+            source_file = func_data.get('source_file')
+            if source_file:
+                source_path = PROJECT_ROOT / source_file
+                if source_path.exists():
+                    print(f"   Source: {source_file}")
+                    print()
+                    print("   Code:")
+                    with open(source_path) as f:
+                        for line in f:
+                            print(f"   {line}", end='')
+                    print()
+
+        print()
+
+    # Print summary
+    matched_count = sum(1 for name, _ in similar if state.get(name, {}).get('status') == 'matched')
+    print(f"Found {len(similar)} similar functions ({matched_count} already matched)")
+    print()
+
+    if matched_count > 0 and not args.show_code:
+        print("Tip: Use --show-code to see source code of matched functions")
+
+
+if __name__ == "__main__":
+    main()

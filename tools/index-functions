@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""
+tools/index-functions - Build semantic index of all functions for similarity search
+
+This creates embeddings of function assembly code to enable fast similarity search.
+Supports multiple embedding backends:
+  1. sentence-transformers (best, requires: pip install sentence-transformers)
+  2. OpenAI API (requires OPENAI_API_KEY)
+  3. TF-IDF (fallback, no dependencies)
+
+Usage:
+    tools/index-functions [--backend auto|transformers|openai|tfidf] [--force]
+
+The index is saved to state/embeddings.npz for fast loading.
+"""
+
+import json
+import sys
+import os
+import subprocess
+from pathlib import Path
+import argparse
+import pickle
+import numpy as np
+
+# Find project root
+SCRIPT_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = SCRIPT_DIR.parent
+STATE_FILE = PROJECT_ROOT / "state" / "functions.json"
+EMBEDDINGS_FILE = PROJECT_ROOT / "state" / "embeddings.npz"
+CONFIG_FILE = PROJECT_ROOT / "state" / "embedding_config.json"
+
+
+def load_state():
+    """Load functions state."""
+    if not STATE_FILE.exists():
+        print(f"ERROR: State file not found at {STATE_FILE}", file=sys.stderr)
+        print("Run init.sh first.", file=sys.stderr)
+        sys.exit(1)
+
+    with open(STATE_FILE) as f:
+        return json.load(f)
+
+
+def get_assembly(func_name, binary_path):
+    """Get assembly code for a function."""
+    try:
+        # Use the disasm tool with compact mode
+        result = subprocess.run(
+            [str(SCRIPT_DIR / "disasm"), func_name, "--compact"],
+            env={**os.environ, "BINARY_PATH": str(binary_path)},
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        else:
+            return None
+    except Exception as e:
+        print(f"Warning: Could not get assembly for {func_name}: {e}", file=sys.stderr)
+        return None
+
+
+def normalize_assembly(asm_text):
+    """Normalize assembly for better embedding."""
+    import re
+
+    if not asm_text:
+        return ""
+
+    # Extract just the instruction lines
+    lines = []
+    for line in asm_text.split('\n'):
+        # Skip headers and empty lines
+        if not line.strip() or line.startswith('=') or line.startswith('---'):
+            continue
+        # Remove leading symbols and addresses
+        line = re.sub(r'^[│\s]*[+]offset\s+', '', line)
+        line = line.strip()
+        if line:
+            lines.append(line)
+
+    return '\n'.join(lines)
+
+
+class TransformersEmbedder:
+    """Use sentence-transformers for embeddings."""
+
+    def __init__(self):
+        try:
+            from sentence_transformers import SentenceTransformer
+            # Use a small, fast model
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            print("Using sentence-transformers backend (all-MiniLM-L6-v2)")
+        except ImportError:
+            raise ImportError("sentence-transformers not installed. Install with: pip install sentence-transformers")
+
+    def embed(self, texts):
+        """Embed a list of texts."""
+        return self.model.encode(texts, show_progress_bar=True)
+
+
+class OpenAIEmbedder:
+    """Use OpenAI API for embeddings."""
+
+    def __init__(self):
+        import openai
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not set")
+        self.client = openai.OpenAI(api_key=api_key)
+        print("Using OpenAI embeddings backend")
+
+    def embed(self, texts):
+        """Embed a list of texts."""
+        embeddings = []
+        for i, text in enumerate(texts):
+            print(f"Embedding {i+1}/{len(texts)}...", end='\r')
+            response = self.client.embeddings.create(
+                model="text-embedding-3-small",
+                input=text[:8000]  # Truncate if too long
+            )
+            embeddings.append(response.data[0].embedding)
+        print()
+        return np.array(embeddings)
+
+
+class TFIDFEmbedder:
+    """Fallback TF-IDF based embeddings."""
+
+    def __init__(self):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        self.vectorizer = TfidfVectorizer(
+            max_features=512,
+            ngram_range=(1, 3),
+            analyzer='word',
+        )
+        print("Using TF-IDF backend (fallback)")
+
+    def embed(self, texts):
+        """Embed a list of texts."""
+        # Fit and transform
+        embeddings = self.vectorizer.fit_transform(texts).toarray()
+        return embeddings
+
+
+def get_embedder(backend='auto'):
+    """Get the appropriate embedder."""
+    if backend == 'auto':
+        # Try backends in order of preference
+        try:
+            return TransformersEmbedder()
+        except ImportError:
+            pass
+
+        try:
+            return OpenAIEmbedder()
+        except (ImportError, ValueError):
+            pass
+
+        # Fallback to TF-IDF
+        try:
+            return TFIDFEmbedder()
+        except ImportError:
+            print("ERROR: No embedding backend available. Install scikit-learn or sentence-transformers.", file=sys.stderr)
+            sys.exit(1)
+
+    elif backend == 'transformers':
+        return TransformersEmbedder()
+    elif backend == 'openai':
+        return OpenAIEmbedder()
+    elif backend == 'tfidf':
+        return TFIDFEmbedder()
+    else:
+        print(f"ERROR: Unknown backend: {backend}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Build semantic index of functions')
+    parser.add_argument('--backend', choices=['auto', 'transformers', 'openai', 'tfidf'], default='auto',
+                        help='Embedding backend to use')
+    parser.add_argument('--force', action='store_true', help='Rebuild index even if it exists')
+    parser.add_argument('--binary', help='Override binary path from config')
+    args = parser.parse_args()
+
+    # Check if index already exists
+    if EMBEDDINGS_FILE.exists() and not args.force:
+        print(f"Index already exists at {EMBEDDINGS_FILE}")
+        print("Use --force to rebuild")
+        return
+
+    # Load state
+    state = load_state()
+    print(f"Found {len(state)} functions")
+
+    # Get binary path
+    if args.binary:
+        binary_path = Path(args.binary)
+    else:
+        # Try to load from config
+        try:
+            with open(PROJECT_ROOT / "config.sh") as f:
+                for line in f:
+                    if line.startswith("BINARY_PATH="):
+                        binary_path = Path(line.split("=", 1)[1].strip().strip('"'))
+                        break
+                else:
+                    print("ERROR: Could not find BINARY_PATH in config.sh", file=sys.stderr)
+                    sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: Could not load config.sh: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if not binary_path.exists():
+        print(f"ERROR: Binary not found at {binary_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Binary: {binary_path}")
+    print()
+
+    # Get embedder
+    embedder = get_embedder(args.backend)
+    print()
+
+    # Collect assembly for all functions
+    print("Extracting assembly code...")
+    func_names = []
+    assemblies = []
+
+    for i, (name, data) in enumerate(state.items()):
+        print(f"Processing {i+1}/{len(state)}: {name[:50]}...", end='\r')
+
+        # Get assembly
+        asm = get_assembly(name, binary_path)
+        if asm:
+            normalized = normalize_assembly(asm)
+            if normalized:
+                func_names.append(name)
+                assemblies.append(normalized)
+
+    print()
+    print(f"Successfully extracted {len(assemblies)} functions")
+
+    if not assemblies:
+        print("ERROR: No assembly code extracted", file=sys.stderr)
+        sys.exit(1)
+
+    # Generate embeddings
+    print()
+    print("Generating embeddings...")
+    embeddings = embedder.embed(assemblies)
+    print(f"Generated embeddings with shape: {embeddings.shape}")
+
+    # Save embeddings
+    print()
+    print(f"Saving index to {EMBEDDINGS_FILE}...")
+    np.savez_compressed(
+        EMBEDDINGS_FILE,
+        embeddings=embeddings,
+        func_names=func_names,
+    )
+
+    # Save config
+    config = {
+        'backend': args.backend,
+        'num_functions': len(func_names),
+        'embedding_dim': embeddings.shape[1],
+    }
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+
+    print()
+    print("✓ Index built successfully!")
+    print(f"  Functions indexed: {len(func_names)}")
+    print(f"  Embedding dimension: {embeddings.shape[1]}")
+    print(f"  Index file: {EMBEDDINGS_FILE}")
+    print()
+    print("Use 'tools/find-similar <function>' to find similar functions")
+
+
+if __name__ == "__main__":
+    main()

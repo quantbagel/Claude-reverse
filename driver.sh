@@ -146,21 +146,23 @@ invoke_claude() {
 Your goal is to write C code that compiles to assembly that EXACTLY matches the original binary.
 
 IMPORTANT WORKFLOW:
-1. First, use tools/disasm to see the assembly of '$func_name'
-2. Use tools/context to understand what functions it calls and any dependencies
-3. Write your C implementation in src/${func_name}.c
-4. Use tools/build to compile your code
-5. Use tools/compare to check if your code matches the original
-6. If there's a mismatch, analyze the diff and adjust your code
-7. Repeat steps 4-6 until you get a MATCH or determine it's not possible
+1. First, use 'tools/disasm $func_name --compact' to see the assembly (compact mode reduces tokens)
+2. Use 'tools/find-similar $func_name --matched-only --show-code' to see similar ALREADY DECOMPILED functions as examples
+3. Use 'tools/context $func_name' to understand what functions it calls and any dependencies
+4. Write your C implementation in src/${func_name}.c
+5. Use tools/build to compile your code
+6. Use tools/compare to check if your code matches the original
+7. If there's a mismatch, analyze the diff and adjust your code
+8. Repeat steps 5-7 until you get a MATCH or determine it's not possible
 
 RULES:
 - Write idiomatic C code, but prioritize matching assembly over readability
 - You may need to use specific patterns (goto, pointer arithmetic) to match
 - Include necessary headers from include/
+- Learn from similar matched functions - they show patterns that work
 - If you can't match after several attempts, explain why and stop
 
-START NOW: Begin by running tools/disasm $func_name"
+START NOW: Begin by running tools/disasm $func_name --compact"
 
     # Build the Claude command
     local claude_cmd="claude"
