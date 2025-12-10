@@ -1,0 +1,71 @@
+#!/bin/bash
+# Example configuration for decompilation project
+# Copy this to config.sh and adjust for your target binary
+
+# ============================================
+# TARGET BINARY
+# ============================================
+# Path to the binary you want to decompile
+BINARY_PATH="/path/to/your/binary"
+
+# ============================================
+# ARCHITECTURE
+# ============================================
+# Target architecture: x86_64, arm64, i386
+ARCH="x86_64"
+
+# ============================================
+# COMPILER SETTINGS
+# ============================================
+# Compiler to use (clang recommended for better matching)
+CC="clang"
+
+# Compiler flags - CRITICAL for matching!
+# You'll need to experiment to find the right combination.
+#
+# Common optimization levels to try:
+#   -O0  No optimization (debug builds)
+#   -O1  Basic optimization
+#   -O2  Standard optimization (most common)
+#   -O3  Aggressive optimization
+#   -Os  Optimize for size
+#
+# Other flags that may be needed:
+#   -fno-stack-protector   Disable stack canaries
+#   -fno-omit-frame-pointer  Keep frame pointer
+#   -fPIC / -fPIE          Position independent code
+#   -fno-strict-aliasing   Disable strict aliasing
+#   -fwrapv                Signed overflow wraps
+#
+CFLAGS="-O2"
+
+# Architecture-specific flags are added automatically based on ARCH:
+#   x86_64: -m64
+#   i386:   -m32
+#   arm64:  -arch arm64
+
+# ============================================
+# DECOMPILATION SETTINGS
+# ============================================
+# Maximum attempts per function before giving up
+MAX_ATTEMPTS=10
+
+# Maximum Claude turns per decompilation attempt
+CLAUDE_MAX_TURNS=50
+
+# ============================================
+# TIPS FOR MATCHING
+# ============================================
+# 1. Use 'file' command to check binary type
+# 2. Use 'otool -L' (macOS) or 'ldd' (Linux) to see libraries
+# 3. Check if binary has debug symbols: 'file' will say "with debug_info"
+# 4. Try to find original compiler (strings binary | grep -i gcc/clang)
+# 5. Check for compiler version strings in the binary
+#
+# For macOS binaries:
+#   - Usually compiled with Apple Clang
+#   - Try: CC="clang" CFLAGS="-O2 -arch x86_64"
+#
+# For Linux binaries:
+#   - Check if GCC or Clang
+#   - Try: CC="gcc" CFLAGS="-O2 -fno-stack-protector"
